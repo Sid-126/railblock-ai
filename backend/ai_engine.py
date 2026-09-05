@@ -21,14 +21,312 @@ def min_to_time(m: int) -> str:
     return f"{m // 60:02d}:{m % 60:02d}"
 
 
-def compute_priority(task: dict) -> float:
-    """AI priority score (can be replaced by ML model later)."""
-    score = (
-        0.40 * task["criticality"]
-        + 0.30 * task["urgency"]
-        + 0.20 * task["impact"]
-        + 0.10 * min(100, task.get("overdue_days", 0) * 15)
+# ============================================================
+# TASK SCORING ENGINE
+# ============================================================
+#
+# This is a rule-based multi-criteria decision system.
+#
+# It converts meaningful operational inputs into:
+#
+#   1. Criticality Score
+#   2. Urgency Score
+#   3. Impact Score
+#   4. Overdue Score
+#   5. Final Priority Score
+#
+# Scores are calculated from transparent rules so that
+# railway officers can understand and verify the decision.
+# ============================================================
+
+
+# ------------------------------------------------------------
+# HELPER FUNCTION
+# ------------------------------------------------------------
+
+def map_score(value, mapping, default=0):
+    """
+    Convert a text category into a numerical score.
+
+    Example:
+
+        value = "critical"
+
+        mapping = {
+            "low": 25,
+            "medium": 50,
+            "high": 75,
+            "critical": 100
+        }
+
+        Result = 100
+    """
+
+    if value is None:
+        return default
+
+    return mapping.get(str(value).lower().strip(), default)
+
+
+# ============================================================
+# CRITICALITY CALCULATION
+# ============================================================
+
+def calculate_criticality(task: dict) -> float:
+    """
+    Calculate how serious the task is.
+
+    Criticality depends on:
+
+    1. Fault Severity       -> 40%
+    2. Safety Risk          -> 40%
+    3. Asset Importance     -> 20%
+    """
+
+    severity_scores = {
+        "minor": 25,
+        "moderate": 50,
+        "major": 75,
+        "severe": 90,
+        "critical": 100
+    }
+
+    safety_scores = {
+        "low": 25,
+        "medium": 50,
+        "high": 75,
+        "critical": 100
+    }
+
+    asset_scores = {
+        "low": 25,
+        "medium": 50,
+        "high": 75,
+        "critical": 100
+    }
+
+    fault_severity = map_score(
+        task.get("fault_severity"),
+        severity_scores
     )
+
+    safety_risk = map_score(
+        task.get("safety_risk"),
+        safety_scores
+    )
+
+    asset_importance = map_score(
+        task.get("asset_importance"),
+        asset_scores
+    )
+
+    score = (
+        0.40 * fault_severity
+        + 0.40 * safety_risk
+        + 0.20 * asset_importance
+    )
+
+    return round(score, 1)
+
+
+# ============================================================
+# URGENCY CALCULATION
+# ============================================================
+
+def calculate_urgency(task: dict) -> float:
+    """
+    Calculate how quickly the task must be completed.
+
+    Urgency depends on:
+
+    1. Deterioration Rate   -> 35%
+    2. Response Deadline    -> 45%
+    3. Safety Escalation    -> 20%
+    """
+
+    deterioration_scores = {
+        "slow": 25,
+        "moderate": 50,
+        "fast": 75,
+        "rapid": 100
+    }
+
+    deadline_scores = {
+        "within_7_days": 25,
+        "within_3_days": 50,
+        "within_24_hours": 75,
+        "immediate": 100
+    }
+
+    escalation_scores = {
+        "low": 25,
+        "medium": 50,
+        "high": 75,
+        "critical": 100
+    }
+
+    deterioration_rate = map_score(
+        task.get("deterioration_rate"),
+        deterioration_scores
+    )
+
+    response_deadline = map_score(
+        task.get("response_deadline"),
+        deadline_scores
+    )
+
+    safety_escalation = map_score(
+        task.get("safety_escalation"),
+        escalation_scores
+    )
+
+    score = (
+        0.35 * deterioration_rate
+        + 0.45 * response_deadline
+        + 0.20 * safety_escalation
+    )
+
+    return round(score, 1)
+
+
+# ============================================================
+# IMPACT CALCULATION
+# ============================================================
+
+def calculate_impact(task: dict) -> float:
+    """
+    Calculate the operational impact of the task.
+
+    Impact depends on:
+
+    1. Number of trains affected       -> 40%
+    2. Route importance                -> 30%
+    3. Operational disruption          -> 30%
+    """
+
+    trains_affected = task.get("trains_affected", 0)
+
+    # Convert number of trains into a score.
+    #
+    # 0 trains       -> 0
+    # 20 trains      -> 25
+    # 40 trains      -> 50
+    # 60 trains      -> 75
+    # 80+ trains     -> 100
+
+    if trains_affected >= 80:
+        train_score = 100
+
+    elif trains_affected >= 60:
+        train_score = 75
+
+    elif trains_affected >= 40:
+        train_score = 50
+
+    elif trains_affected >= 20:
+        train_score = 25
+
+    else:
+        train_score = 10
+
+    route_scores = {
+        "low": 25,
+        "medium": 50,
+        "high": 75,
+        "critical": 100
+    }
+
+    disruption_scores = {
+        "low": 25,
+        "medium": 50,
+        "high": 75,
+        "critical": 100
+    }
+
+    route_importance = map_score(
+        task.get("route_importance"),
+        route_scores
+    )
+
+    operational_disruption = map_score(
+        task.get("operational_disruption"),
+        disruption_scores
+    )
+
+    score = (
+        0.40 * train_score
+        + 0.30 * route_importance
+        + 0.30 * operational_disruption
+    )
+
+    return round(score, 1)
+
+
+# ============================================================
+# OVERDUE SCORE
+# ============================================================
+
+def calculate_overdue_score(task: dict) -> float:
+    """
+    Calculate how much priority increases because
+    the task has remained pending.
+
+    Every overdue day increases the score by 15 points.
+
+    Maximum score = 100.
+    """
+
+    overdue_days = task.get("overdue_days", 0)
+
+    score = min(100, overdue_days * 15)
+
+    return round(score, 1)
+
+
+# ============================================================
+# FINAL PRIORITY CALCULATION
+# ============================================================
+
+def compute_priority(task: dict) -> float:
+    """
+    Calculate the final priority score.
+
+    Weight distribution:
+
+    Criticality = 40%
+    Urgency     = 30%
+    Impact      = 20%
+    Overdue     = 10%
+    """
+
+    # Calculate scores from the actual task characteristics
+
+    criticality = calculate_criticality(task)
+
+    urgency = calculate_urgency(task)
+
+    impact = calculate_impact(task)
+
+    overdue_score = calculate_overdue_score(task)
+
+    # Store calculated values inside the task dictionary.
+    #
+    # This allows the frontend/API to display the explanation.
+
+    task["criticality"] = criticality
+    task["urgency"] = urgency
+    task["impact"] = impact
+    task["overdue_score"] = overdue_score
+
+    # Final weighted priority
+
+    score = (
+        0.40 * criticality
+        + 0.30 * urgency
+        + 0.20 * impact
+        + 0.10 * overdue_score
+    )
+
     return round(score, 1)
 
 
