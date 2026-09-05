@@ -63,23 +63,57 @@ def init_db():
     );
 
     CREATE TABLE tasks (
-        id INTEGER PRIMARY KEY,
-        task_code TEXT UNIQUE,
-        description TEXT,
-        department TEXT,
-        section_id INTEGER,
-        criticality REAL,
-        urgency REAL,
-        impact REAL,
-        est_hours REAL,
-        overdue_days INTEGER DEFAULT 0,
-        required_workers INTEGER DEFAULT 4,
-        requires_crane INTEGER DEFAULT 0,
-        requires_tower_wagon INTEGER DEFAULT 0,
-        requires_welding INTEGER DEFAULT 0,
-        status TEXT DEFAULT 'pending',
-        FOREIGN KEY (section_id) REFERENCES sections(id)
-    );
+    id INTEGER PRIMARY KEY,
+    task_code TEXT UNIQUE,
+    description TEXT,
+    department TEXT,
+    section_id INTEGER,
+
+    -- These scores will be calculated automatically
+    criticality REAL DEFAULT 0,
+    urgency REAL DEFAULT 0,
+    impact REAL DEFAULT 0,
+
+    -- ==============================
+    -- USER INPUTS FOR CRITICALITY
+    -- ==============================
+
+    fault_severity TEXT,
+    safety_risk TEXT,
+    asset_importance TEXT,
+
+    -- ==============================
+    -- USER INPUTS FOR URGENCY
+    -- ==============================
+
+    deterioration_rate TEXT,
+    response_deadline TEXT,
+    safety_escalation TEXT,
+
+    -- ==============================
+    -- USER INPUTS FOR IMPACT
+    -- ==============================
+
+    trains_affected INTEGER DEFAULT 0,
+    route_importance TEXT,
+    operational_disruption TEXT,
+
+    -- ==============================
+    -- TASK DETAILS
+    -- ==============================
+
+    est_hours REAL,
+    overdue_days INTEGER DEFAULT 0,
+    required_workers INTEGER DEFAULT 4,
+
+    requires_crane INTEGER DEFAULT 0,
+    requires_tower_wagon INTEGER DEFAULT 0,
+    requires_welding INTEGER DEFAULT 0,
+
+    status TEXT DEFAULT 'pending',
+
+    FOREIGN KEY (section_id) REFERENCES sections(id)
+);
 
     CREATE TABLE resources (
         id INTEGER PRIMARY KEY,
