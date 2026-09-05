@@ -1,362 +1,497 @@
-```python
 """
-RailBlock AI Engine
+RailBlock AI - AI / Optimization Engine
 
-Features:
-- Rule-based multi-criteria task priority scoring
-- Train schedule gap detection
-- Department-specific resource checking
-- Role assignment
-- Constraint-based heuristic block scheduling
-- What-If delay simulation
-- What-If weather simulation
+This module handles:
+
+1. Task priority calculation
+2. Train-free maintenance gap detection
+3. Resource availability checking
+4. Role assignment
+5. Multi-criteria block scheduling
+6. Block proposal generation
+7. Saving proposals
+8. What-if delay analysis
+9. What-if weather analysis
+
+IMPORTANT:
+
+This is NOT Machine Learning.
+
+The system uses a:
+
+Multi-Criteria + Constraint-Based Heuristic Optimization Algorithm
+
+The system combines:
+
+- Task Criticality
+- Task Urgency
+- Operational Impact
+- Overdue Days
+- Train-free Gap Suitability
+- Time Utilization
+- Resource Availability
+
+to generate maintenance block proposals.
 """
+
+from datetime import datetime, timedelta
+from typing import Dict, List
 
 from database import get_conn
 
 
 # ============================================================
-# TIME HELPER FUNCTIONS
+# CONFIGURATION
 # ============================================================
 
-def time_to_min(t: str) -> int:
-    """Convert HH:MM time into total minutes."""
-
-    h, m = map(int, t.split(":"))
-    return h * 60 + m
-
-
-def min_to_time(m: int) -> str:
-    """Convert total minutes into HH:MM format."""
-
-    m = m % (24 * 60)
-
-    return f"{m // 60:02d}:{m % 60:02d}"
-
-
-# ============================================================
-# TASK SCORING ENGINE
-# ============================================================
+# Priority weights
 #
-# This is a rule-based multi-criteria decision system.
-#
-# It calculates:
-#
-# 1. Criticality
-# 2. Urgency
-# 3. Impact
-# 4. Overdue Score
-# 5. Final Priority Score
-#
-# ============================================================
+# These values determine how much each factor contributes
+# to the final task priority.
+
+WEIGHT_CRITICALITY = 0.35
+WEIGHT_URGENCY = 0.30
+WEIGHT_IMPACT = 0.25
+WEIGHT_OVERDUE = 0.10
 
 
-def map_score(value, mapping, default=0):
-    """
-    Convert a text category into a numerical score.
-    """
+# Scheduling score weights
 
-    if value is None:
-        return default
-
-    return mapping.get(
-        str(value).lower().strip(),
-        default
-    )
+WEIGHT_TASK_PRIORITY = 0.70
+WEIGHT_GAP_SUITABILITY = 0.20
+WEIGHT_TIME_FIT = 0.10
 
 
 # ============================================================
-# CRITICALITY CALCULATION
+# HELPER FUNCTIONS
 # ============================================================
 
-def calculate_criticality(task: dict) -> float:
+def clamp(value: float, minimum: float = 0, maximum: float = 100) -> float:
     """
-    Criticality depends on:
-
-    Fault Severity     = 40%
-    Safety Risk        = 40%
-    Asset Importance   = 20%
+    Restrict a value between minimum and maximum.
     """
 
-    severity_scores = {
-        "minor": 25,
-        "moderate": 50,
-        "major": 75,
-        "severe": 90,
-        "critical": 100,
-    }
-
-    safety_scores = {
-        "low": 25,
-        "medium": 50,
-        "high": 75,
-        "critical": 100,
-    }
-
-    asset_scores = {
-        "low": 25,
-        "medium": 50,
-        "high": 75,
-        "critical": 100,
-    }
-
-    fault_severity = map_score(
-        task.get("fault_severity"),
-        severity_scores
-    )
-
-    safety_risk = map_score(
-        task.get("safety_risk"),
-        safety_scores
-    )
-
-    asset_importance = map_score(
-        task.get("asset_importance"),
-        asset_scores
-    )
-
-    score = (
-        0.40 * fault_severity
-        + 0.40 * safety_risk
-        + 0.20 * asset_importance
-    )
-
-    return round(score, 1)
+    return max(minimum, min(value, maximum))
 
 
-# ============================================================
-# URGENCY CALCULATION
-# ============================================================
-
-def calculate_urgency(task: dict) -> float:
+def time_to_minutes(time_string: str) -> int:
     """
-    Urgency depends on:
+    Convert HH:MM into total minutes.
 
-    Deterioration Rate = 35%
-    Response Deadline  = 45%
-    Safety Escalation  = 20%
+    Example:
+
+    "10:30"
+
+    becomes:
+
+    630 minutes
     """
 
-    deterioration_scores = {
-        "slow": 25,
-        "moderate": 50,
-        "fast": 75,
-        "rapid": 100,
-    }
+    hours, minutes = map(int, time_string.split(":"))
 
-    deadline_scores = {
-        "within_7_days": 25,
-        "within_3_days": 50,
-        "within_24_hours": 75,
-        "immediate": 100,
-    }
-
-    escalation_scores = {
-        "low": 25,
-        "medium": 50,
-        "high": 75,
-        "critical": 100,
-    }
-
-    deterioration_rate = map_score(
-        task.get("deterioration_rate"),
-        deterioration_scores
-    )
-
-    response_deadline = map_score(
-        task.get("response_deadline"),
-        deadline_scores
-    )
-
-    safety_escalation = map_score(
-        task.get("safety_escalation"),
-        escalation_scores
-    )
-
-    score = (
-        0.35 * deterioration_rate
-        + 0.45 * response_deadline
-        + 0.20 * safety_escalation
-    )
-
-    return round(score, 1)
+    return hours * 60 + minutes
 
 
-# ============================================================
-# IMPACT CALCULATION
-# ============================================================
-
-def calculate_impact(task: dict) -> float:
+def minutes_to_time(total_minutes: int) -> str:
     """
-    Impact depends on:
-
-    Trains Affected          = 40%
-    Route Importance         = 30%
-    Operational Disruption   = 30%
+    Convert total minutes into HH:MM format.
     """
 
-    trains_affected = task.get(
-        "trains_affected",
-        0
-    )
+    total_minutes = total_minutes % (24 * 60)
 
-    if trains_affected >= 80:
-        train_score = 100
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
 
-    elif trains_affected >= 60:
-        train_score = 75
+    return f"{hours:02d}:{minutes:02d}"
 
-    elif trains_affected >= 40:
-        train_score = 50
-
-    elif trains_affected >= 20:
-        train_score = 25
-
-    else:
-        train_score = 10
-
-    route_scores = {
-        "low": 25,
-        "medium": 50,
-        "high": 75,
-        "critical": 100,
-    }
-
-    disruption_scores = {
-        "low": 25,
-        "medium": 50,
-        "high": 75,
-        "critical": 100,
-    }
-
-    route_importance = map_score(
-        task.get("route_importance"),
-        route_scores
-    )
-
-    operational_disruption = map_score(
-        task.get("operational_disruption"),
-        disruption_scores
-    )
-
-    score = (
-        0.40 * train_score
-        + 0.30 * route_importance
-        + 0.30 * operational_disruption
-    )
-
-    return round(score, 1)
-
-
-# ============================================================
-# OVERDUE SCORE
-# ============================================================
-
-def calculate_overdue_score(task: dict) -> float:
-    """
-    Every overdue day increases the score by 15.
-
-    Maximum score = 100.
-    """
-
-    overdue_days = task.get(
-        "overdue_days",
-        0
-    )
-
-    score = min(
-        100,
-        overdue_days * 15
-    )
-
-    return round(score, 1)
-
-
-# ============================================================
-# FINAL PRIORITY CALCULATION
-# ============================================================
-
-def compute_priority(task: dict) -> float:
-    """
-    Final priority calculation:
-
-    Criticality = 40%
-    Urgency     = 30%
-    Impact      = 20%
-    Overdue     = 10%
-    """
-
-    criticality = calculate_criticality(task)
-
-    urgency = calculate_urgency(task)
-
-    impact = calculate_impact(task)
-
-    overdue_score = calculate_overdue_score(task)
-
-    # Store component scores for API/frontend explanation
-
-    task["criticality"] = criticality
-
-    task["urgency"] = urgency
-
-    task["impact"] = impact
-
-    task["overdue_score"] = overdue_score
-
-    score = (
-        0.40 * criticality
-        + 0.30 * urgency
-        + 0.20 * impact
-        + 0.10 * overdue_score
-    )
-
-    return round(score, 1)
-
-
-# ============================================================
-# PRIORITY LABEL
-# ============================================================
 
 def get_priority_label(score: float) -> str:
+    """
+    Convert numerical priority score into a readable label.
+    """
 
     if score >= 85:
-        return "Critical"
+        return "CRITICAL"
 
     if score >= 70:
-        return "High"
+        return "HIGH"
 
-    if score >= 55:
-        return "Medium"
+    if score >= 50:
+        return "MEDIUM"
 
-    return "Low"
+    return "LOW"
 
 
 # ============================================================
-# TRAIN GAP DETECTION
+# PRIORITY CALCULATION
 # ============================================================
 
-def find_block_gaps(
-    section_id: int = 1,
-    day: str = "Mon",
-    min_gap_minutes: int = 60
-):
+def calculate_overdue_score(overdue_days: int) -> float:
     """
-    Read the train schedule and find available maintenance
-    windows between train movements.
+    Convert overdue days into a score between 0 and 100.
+
+    Logic:
+
+    0 overdue days   -> 0 score
+    10 overdue days  -> 50 score
+    20+ overdue days -> 100 score
+
+    The score is capped at 100.
+    """
+
+    overdue_days = max(0, overdue_days)
+
+    overdue_score = overdue_days * 5
+
+    return clamp(overdue_score)
+
+
+def compute_priority(task: Dict) -> float:
+    """
+    Calculate the final priority score of a maintenance task.
+
+    Formula:
+
+    Priority Score =
+
+        Criticality × 35%
+        +
+        Urgency × 30%
+        +
+        Impact × 25%
+        +
+        Overdue Score × 10%
+
+    All input values are expected to be between 0 and 100.
+
+    This is a weighted multi-criteria decision algorithm.
+    """
+
+    criticality = float(task.get("criticality", 0))
+    urgency = float(task.get("urgency", 0))
+    impact = float(task.get("impact", 0))
+
+    overdue_days = int(task.get("overdue_days", 0))
+
+    overdue_score = calculate_overdue_score(
+        overdue_days
+    )
+
+    priority_score = (
+
+        criticality * WEIGHT_CRITICALITY
+
+        +
+
+        urgency * WEIGHT_URGENCY
+
+        +
+
+        impact * WEIGHT_IMPACT
+
+        +
+
+        overdue_score * WEIGHT_OVERDUE
+
+    )
+
+    return round(
+        clamp(priority_score),
+        1
+    )
+
+
+def get_priority_explanation(task: Dict) -> Dict:
+    """
+    Return a detailed explanation of how the priority score
+    was calculated.
+
+    Useful for:
+
+    - SIH demonstration
+    - Explainable AI concept
+    - Debugging
+    - Judge questions
+    """
+
+    criticality = float(
+        task.get("criticality", 0)
+    )
+
+    urgency = float(
+        task.get("urgency", 0)
+    )
+
+    impact = float(
+        task.get("impact", 0)
+    )
+
+    overdue_days = int(
+        task.get("overdue_days", 0)
+    )
+
+    overdue_score = calculate_overdue_score(
+        overdue_days
+    )
+
+    criticality_contribution = round(
+        criticality * WEIGHT_CRITICALITY,
+        2
+    )
+
+    urgency_contribution = round(
+        urgency * WEIGHT_URGENCY,
+        2
+    )
+
+    impact_contribution = round(
+        impact * WEIGHT_IMPACT,
+        2
+    )
+
+    overdue_contribution = round(
+        overdue_score * WEIGHT_OVERDUE,
+        2
+    )
+
+    final_score = round(
+
+        criticality_contribution
+
+        +
+
+        urgency_contribution
+
+        +
+
+        impact_contribution
+
+        +
+
+        overdue_contribution,
+
+        1
+
+    )
+
+    return {
+
+        "criticality": criticality,
+
+        "urgency": urgency,
+
+        "impact": impact,
+
+        "overdue_days": overdue_days,
+
+        "overdue_score": overdue_score,
+
+        "criticality_contribution":
+            criticality_contribution,
+
+        "urgency_contribution":
+            urgency_contribution,
+
+        "impact_contribution":
+            impact_contribution,
+
+        "overdue_contribution":
+            overdue_contribution,
+
+        "final_score": final_score,
+
+        "priority":
+            get_priority_label(final_score),
+
+    }
+
+
+# ============================================================
+# LIST TASKS WITH PRIORITY
+# ============================================================
+
+def list_tasks_with_priority() -> List[Dict]:
+    """
+    Load all tasks from the database.
+
+    Calculate priority for every task.
+
+    Return tasks sorted from highest priority
+    to lowest priority.
     """
 
     conn = get_conn()
 
     rows = conn.execute(
         """
-        SELECT
-            departure_time,
-            arrival_time,
-            train_no,
-            train_name,
-            train_type
+        SELECT *
+        FROM tasks
+        ORDER BY id
+        """
+    ).fetchall()
 
+    conn.close()
+
+    tasks = []
+
+    for row in rows:
+
+        task = dict(row)
+
+        ai_score = compute_priority(
+            task
+        )
+
+        task["ai_score"] = ai_score
+
+        task["priority"] = (
+            get_priority_label(ai_score)
+        )
+
+        task["priority_explanation"] = (
+            get_priority_explanation(task)
+        )
+
+        tasks.append(task)
+
+    # Highest priority first
+
+    tasks.sort(
+
+        key=lambda task:
+            task["ai_score"],
+
+        reverse=True
+
+    )
+
+    return tasks
+
+
+# ============================================================
+# GAP SUITABILITY
+# ============================================================
+
+def calculate_gap_suitability(
+    duration_hours: float,
+    start_time: str,
+    end_time: str
+) -> float:
+    """
+    Calculate how suitable a train-free gap is
+    for maintenance work.
+
+    Factors considered:
+
+    1. Gap duration
+    2. Time of day
+
+    Longer gaps are generally more useful.
+
+    Night and off-peak periods can receive
+    additional suitability.
+    """
+
+    score = 0
+
+    # --------------------------------------------------------
+    # DURATION SCORE
+    # --------------------------------------------------------
+
+    if duration_hours >= 6:
+
+        score += 70
+
+    elif duration_hours >= 4:
+
+        score += 60
+
+    elif duration_hours >= 3:
+
+        score += 50
+
+    elif duration_hours >= 2:
+
+        score += 40
+
+    elif duration_hours >= 1:
+
+        score += 25
+
+    else:
+
+        score += 10
+
+    # --------------------------------------------------------
+    # TIME OF DAY SCORE
+    # --------------------------------------------------------
+
+    start_hour = int(
+        start_time.split(":")[0]
+    )
+
+    # Night / early morning
+
+    if start_hour >= 22 or start_hour < 6:
+
+        score += 25
+
+    # Midday
+
+    elif 10 <= start_hour < 16:
+
+        score += 15
+
+    # Other periods
+
+    else:
+
+        score += 5
+
+    return round(
+        clamp(score),
+        1
+    )
+
+
+# ============================================================
+# FIND TRAIN-FREE BLOCK GAPS
+# ============================================================
+
+def find_block_gaps(
+    section_id: int,
+    day: str,
+    min_gap_minutes: int = 60
+) -> List[Dict]:
+    """
+    Find train-free maintenance windows.
+
+    Process:
+
+    1. Load train schedule for selected day.
+    2. Sort trains by departure time.
+    3. Find time between one train and the next.
+    4. Keep gaps larger than minimum duration.
+    5. Calculate suitability score.
+
+    IMPORTANT:
+
+    This prototype uses the train schedule stored
+    in the database.
+
+    In a real railway deployment, this would require:
+
+    - Live train movement data
+    - Traffic control integration
+    - Signalling constraints
+    - Safety margins
+    """
+
+    conn = get_conn()
+
+    rows = conn.execute(
+        """
+        SELECT *
         FROM train_schedule
 
         WHERE section_id = ?
@@ -366,243 +501,287 @@ def find_block_gaps(
         """,
         (
             section_id,
-            day,
+            day
         ),
     ).fetchall()
 
     conn.close()
 
+    trains = [
+
+        dict(row)
+
+        for row in rows
+
+    ]
+
+    gaps = []
+
     # --------------------------------------------------------
     # NO TRAINS
     # --------------------------------------------------------
 
-    if not rows:
+    if not trains:
 
-        return [
-            {
-                "start": "06:00",
-                "end": "18:00",
-                "duration_hours": 12.0,
-                "suitability": 90,
-                "reason": "No trains scheduled",
-            }
-        ]
+        return gaps
 
     # --------------------------------------------------------
-    # CREATE OCCUPIED TRAIN WINDOWS
+    # START OF DAY
     # --------------------------------------------------------
 
-    occupied = []
+    day_start = 0
 
-    for row in rows:
-
-        start = time_to_min(
-            row["departure_time"]
-        )
-
-        end = time_to_min(
-            row["arrival_time"]
-        )
-
-        if end < start:
-
-            end += 24 * 60
-
-        # Safety buffer around train movement
-
-        occupied.append(
-            (
-                max(0, start - 10),
-                min(24 * 60, end + 10),
-            )
-        )
-
-    # --------------------------------------------------------
-    # MERGE OVERLAPPING TRAIN WINDOWS
-    # --------------------------------------------------------
-
-    occupied.sort()
-
-    merged = []
-
-    for start, end in occupied:
-
-        if (
-            merged
-            and start <= merged[-1][1]
-        ):
-
-            merged[-1] = (
-
-                merged[-1][0],
-
-                max(
-                    merged[-1][1],
-                    end
-                ),
-
-            )
-
-        else:
-
-            merged.append(
-                [start, end]
-            )
-
-    # --------------------------------------------------------
-    # FIND AVAILABLE GAPS
-    # --------------------------------------------------------
-
-    gaps = []
-
-    cursor = 5 * 60
-
-    day_end = (
-        23 * 60 + 30
+    first_train_start = time_to_minutes(
+        trains[0]["departure_time"]
     )
 
-    for start, end in merged:
+    initial_gap = (
 
-        if (
-            start - cursor
-            >= min_gap_minutes
-        ):
+        first_train_start
+        -
+        day_start
 
-            duration_hours = (
-                start - cursor
-            ) / 60
+    )
 
-            midpoint = (
-                cursor + start
-            ) / 2
+    if initial_gap >= min_gap_minutes:
 
-            # Prefer mid-day and night windows
+        start_time = "00:00"
 
-            if (
-                10 * 60
-                <= midpoint
-                <= 14 * 60
-            ):
+        end_time = trains[0][
+            "departure_time"
+        ]
 
-                suitability = (
-                    85
-                    + min(
-                        10,
-                        duration_hours
-                    )
-                )
-
-            elif (
-                midpoint >= 21 * 60
-                or midpoint <= 6 * 60
-            ):
-
-                suitability = (
-                    80
-                    + min(
-                        10,
-                        duration_hours
-                    )
-                )
-
-            else:
-
-                suitability = (
-                    60
-                    + min(
-                        15,
-                        duration_hours
-                    )
-                )
-
-            gaps.append({
-
-                "start":
-
-                    min_to_time(
-                        cursor
-                    ),
-
-                "end":
-
-                    min_to_time(
-                        start
-                    ),
-
-                "duration_hours":
-
-                    round(
-                        duration_hours,
-                        1
-                    ),
-
-                "suitability":
-
-                    round(
-                        suitability,
-                        1
-                    ),
-
-                "reason":
-
-                    "Free window between trains",
-
-            })
-
-        cursor = max(
-            cursor,
-            end
+        duration_hours = round(
+            initial_gap / 60,
+            2
         )
 
-    # --------------------------------------------------------
-    # FINAL GAP
-    # --------------------------------------------------------
-
-    if (
-        day_end - cursor
-        >= min_gap_minutes
-    ):
-
-        duration_hours = (
-            day_end - cursor
-        ) / 60
+        suitability = (
+            calculate_gap_suitability(
+                duration_hours,
+                start_time,
+                end_time
+            )
+        )
 
         gaps.append({
 
             "start":
-
-                min_to_time(
-                    cursor
-                ),
+                start_time,
 
             "end":
+                end_time,
 
-                min_to_time(
-                    day_end
-                ),
+            "duration_minutes":
+                initial_gap,
 
             "duration_hours":
+                duration_hours,
 
-                round(
-                    duration_hours,
-                    1
-                ),
-
-            "suitability": 75,
+            "suitability":
+                suitability,
 
             "reason":
-
-                "Evening free window",
+                "Before first scheduled train",
 
         })
 
-    # Best gaps first
+    # --------------------------------------------------------
+    # GAPS BETWEEN TRAINS
+    # --------------------------------------------------------
+
+    for index in range(
+        len(trains) - 1
+    ):
+
+        current_train = trains[index]
+
+        next_train = trains[
+            index + 1
+        ]
+
+        # Current train clears section
+
+        current_end = time_to_minutes(
+
+            current_train[
+                "arrival_time"
+            ]
+
+        )
+
+        # Next train enters section
+
+        next_start = time_to_minutes(
+
+            next_train[
+                "departure_time"
+            ]
+
+        )
+
+        gap_minutes = (
+
+            next_start
+            -
+            current_end
+
+        )
+
+        if gap_minutes >= min_gap_minutes:
+
+            start_time = (
+                current_train[
+                    "arrival_time"
+                ]
+            )
+
+            end_time = (
+                next_train[
+                    "departure_time"
+                ]
+            )
+
+            duration_hours = round(
+
+                gap_minutes / 60,
+
+                2
+
+            )
+
+            suitability = (
+
+                calculate_gap_suitability(
+
+                    duration_hours,
+
+                    start_time,
+
+                    end_time
+
+                )
+
+            )
+
+            gaps.append({
+
+                "start":
+                    start_time,
+
+                "end":
+                    end_time,
+
+                "duration_minutes":
+                    gap_minutes,
+
+                "duration_hours":
+                    duration_hours,
+
+                "suitability":
+                    suitability,
+
+                "reason":
+                    (
+                        "Gap between "
+                        f"{current_train['train_no']} "
+                        "and "
+                        f"{next_train['train_no']}"
+                    ),
+
+            })
+
+    # --------------------------------------------------------
+    # END OF DAY
+    # --------------------------------------------------------
+
+    last_train = trains[-1]
+
+    last_train_end = time_to_minutes(
+
+        last_train[
+            "arrival_time"
+        ]
+
+    )
+
+    day_end = 24 * 60
+
+    final_gap = (
+
+        day_end
+        -
+        last_train_end
+
+    )
+
+    if final_gap >= min_gap_minutes:
+
+        start_time = (
+
+            last_train[
+                "arrival_time"
+            ]
+
+        )
+
+        end_time = "24:00"
+
+        duration_hours = round(
+
+            final_gap / 60,
+
+            2
+
+        )
+
+        suitability = (
+
+            calculate_gap_suitability(
+
+                duration_hours,
+
+                start_time,
+
+                end_time
+
+            )
+
+        )
+
+        gaps.append({
+
+            "start":
+                start_time,
+
+            "end":
+                end_time,
+
+            "duration_minutes":
+                final_gap,
+
+            "duration_hours":
+                duration_hours,
+
+            "suitability":
+                suitability,
+
+            "reason":
+                "After last scheduled train",
+
+        })
+
+    # --------------------------------------------------------
+    # SORT GAPS
+    # --------------------------------------------------------
 
     gaps.sort(
 
         key=lambda gap:
 
-            -gap["suitability"]
+            gap["suitability"],
+
+        reverse=True
 
     )
 
@@ -610,598 +789,416 @@ def find_block_gaps(
 
 
 # ============================================================
-# DEPARTMENT-SPECIFIC RESOURCE CHECK
+# RESOURCE CHECKING
 # ============================================================
 
 def check_resources(
     day: str,
-    tasks: list
-) -> dict:
+    tasks: List[Dict]
+) -> Dict:
     """
-    Check whether the correct resources are available.
+    Check whether all required resources
+    are available.
 
-    Engineering Tasks
-        -> Engineering Workers
+    Resources checked:
 
-    S&T Tasks
-        -> Signal Workers
+    - Workers
+    - Crane
+    - Tower Wagon
+    - Welding Unit
 
-    Traction Tasks
-        -> TRD Workers
+    Returns:
 
-    Special resources:
-        -> Crane
-        -> Tower Wagon
-        -> Welding Unit
-        -> Supervisors
+    {
+        "ok": True / False,
+        "notes": [...],
+        "requirements": {...}
+    }
     """
 
     conn = get_conn()
 
-    # --------------------------------------------------------
-    # CALCULATE WORKER REQUIREMENTS BY DEPARTMENT
-    # --------------------------------------------------------
+    notes = []
 
-    worker_requirements = {
+    requirements = {
 
-        "Engineering": 0,
+        "workers_by_department": {},
 
-        "S&T": 0,
+        "crane_required": False,
 
-        "Traction": 0,
+        "tower_wagon_required": False,
+
+        "welding_required": False,
 
     }
+
+    # --------------------------------------------------------
+    # CALCULATE REQUIREMENTS
+    # --------------------------------------------------------
 
     for task in tasks:
 
         department = task.get(
-            "department"
+
+            "department",
+
+            "Unknown"
+
         )
 
-        required_workers = task.get(
-            "required_workers",
-            4
+        required_workers = int(
+
+            task.get(
+
+                "required_workers",
+
+                0
+
+            )
+
         )
 
-        if (
-            department
-            in worker_requirements
+        requirements[
+            "workers_by_department"
+        ][department] = (
+
+            requirements[
+                "workers_by_department"
+            ].get(
+
+                department,
+
+                0
+
+            )
+
+            +
+
+            required_workers
+
+        )
+
+        if int(
+            task.get(
+                "requires_crane",
+                0
+            )
         ):
 
-            worker_requirements[
-                department
-            ] += required_workers
+            requirements[
+                "crane_required"
+            ] = True
+
+        if int(
+            task.get(
+                "requires_tower_wagon",
+                0
+            )
+        ):
+
+            requirements[
+                "tower_wagon_required"
+            ] = True
+
+        if int(
+            task.get(
+                "requires_welding",
+                0
+            )
+        ):
+
+            requirements[
+                "welding_required"
+            ] = True
 
     # --------------------------------------------------------
-    # GET RESOURCE AVAILABILITY
+    # CHECK WORKERS BY DEPARTMENT
     # --------------------------------------------------------
 
-    def get_available(resource_id):
+    for department, required in (
+
+        requirements[
+            "workers_by_department"
+        ].items()
+
+    ):
 
         row = conn.execute(
+
             """
-            SELECT available_count
+            SELECT
+                COALESCE(
+                    SUM(ra.available_count),
+                    0
+                ) AS available
 
-            FROM resource_availability
+            FROM resources r
 
-            WHERE resource_id = ?
+            JOIN resource_availability ra
 
-            AND day_of_week = ?
+                ON ra.resource_id = r.id
 
-            AND shift = 'day'
+            WHERE
+                r.resource_type = 'workers'
+
+            AND
+                r.department = ?
+
+            AND
+                ra.day_of_week = ?
             """,
+
             (
-                resource_id,
-                day,
+                department,
+                day
             ),
+
         ).fetchone()
 
-        if row:
+        available = (
 
-            return row[
-                "available_count"
-            ]
+            row["available"]
 
-        return 0
+            if row
+
+            else 0
+
+        )
+
+        if available < required:
+
+            notes.append(
+
+                f"Insufficient workers for "
+                f"{department}: "
+
+                f"Required {required}, "
+
+                f"Available {available}"
+
+            )
+
+        else:
+
+            notes.append(
+
+                f"{department} workers available: "
+
+                f"{available} available, "
+
+                f"{required} required"
+
+            )
 
     # --------------------------------------------------------
-    # DEPARTMENT-SPECIFIC WORKERS
+    # CHECK CRANE
     # --------------------------------------------------------
 
-    engineering_workers = (
+    if requirements["crane_required"]:
 
-        get_available(1)
+        row = conn.execute(
 
-        + get_available(2)
+            """
+            SELECT
+                COALESCE(
+                    SUM(ra.available_count),
+                    0
+                ) AS available
 
-    )
+            FROM resources r
 
-    signal_workers = get_available(3)
+            JOIN resource_availability ra
 
-    traction_workers = get_available(4)
+                ON ra.resource_id = r.id
+
+            WHERE
+                r.resource_type = 'crane'
+
+            AND
+                ra.day_of_week = ?
+            """,
+
+            (day,),
+
+        ).fetchone()
+
+        available = (
+
+            row["available"]
+
+            if row
+
+            else 0
+
+        )
+
+        if available < 1:
+
+            notes.append(
+
+                "Crane required but unavailable"
+
+            )
+
+        else:
+
+            notes.append(
+
+                "Crane available"
+
+            )
 
     # --------------------------------------------------------
-    # SPECIAL RESOURCES
+    # CHECK TOWER WAGON
     # --------------------------------------------------------
 
-    crane_available = get_available(5)
+    if requirements[
+        "tower_wagon_required"
+    ]:
 
-    tower_wagon_available = get_available(6)
+        row = conn.execute(
 
-    welding_available = get_available(7)
+            """
+            SELECT
+                COALESCE(
+                    SUM(ra.available_count),
+                    0
+                ) AS available
 
-    supervisors_available = get_available(8)
+            FROM resources r
+
+            JOIN resource_availability ra
+
+                ON ra.resource_id = r.id
+
+            WHERE
+                r.resource_type = 'tower_wagon'
+
+            AND
+                ra.day_of_week = ?
+            """,
+
+            (day,),
+
+        ).fetchone()
+
+        available = (
+
+            row["available"]
+
+            if row
+
+            else 0
+
+        )
+
+        if available < 1:
+
+            notes.append(
+
+                "Tower Wagon required but unavailable"
+
+            )
+
+        else:
+
+            notes.append(
+
+                "Tower Wagon available"
+
+            )
+
+    # --------------------------------------------------------
+    # CHECK WELDING UNIT
+    # --------------------------------------------------------
+
+    if requirements[
+        "welding_required"
+    ]:
+
+        row = conn.execute(
+
+            """
+            SELECT
+                COALESCE(
+                    SUM(ra.available_count),
+                    0
+                ) AS available
+
+            FROM resources r
+
+            JOIN resource_availability ra
+
+                ON ra.resource_id = r.id
+
+            WHERE
+                r.resource_type = 'welding'
+
+            AND
+                ra.day_of_week = ?
+            """,
+
+            (day,),
+
+        ).fetchone()
+
+        available = (
+
+            row["available"]
+
+            if row
+
+            else 0
+
+        )
+
+        if available < 1:
+
+            notes.append(
+
+                "Welding Unit required but unavailable"
+
+            )
+
+        else:
+
+            notes.append(
+
+                "Welding Unit available"
+
+            )
 
     conn.close()
 
     # --------------------------------------------------------
-    # RESOURCE CHECK RESULTS
+    # FINAL RESULT
     # --------------------------------------------------------
 
-    details = []
+    failed = any(
 
-    ok = True
+        "Insufficient" in note
 
-    # ========================================================
-    # ENGINEERING WORKERS
-    # ========================================================
+        or
 
-    engineering_required = (
+        "unavailable" in note
 
-        worker_requirements[
-            "Engineering"
-        ]
+        for note in notes
 
     )
-
-    if engineering_required > 0:
-
-        status = (
-
-            "Available"
-
-            if (
-                engineering_workers
-                >= engineering_required
-            )
-
-            else "Shortage"
-
-        )
-
-        details.append({
-
-            "item":
-
-                "Engineering Workers",
-
-            "department":
-
-                "Engineering",
-
-            "required":
-
-                engineering_required,
-
-            "available":
-
-                engineering_workers,
-
-            "status":
-
-                status,
-
-        })
-
-        if (
-
-            engineering_workers
-            < engineering_required
-
-        ):
-
-            ok = False
-
-    # ========================================================
-    # SIGNAL WORKERS
-    # ========================================================
-
-    signal_required = (
-
-        worker_requirements[
-            "S&T"
-        ]
-
-    )
-
-    if signal_required > 0:
-
-        status = (
-
-            "Available"
-
-            if (
-                signal_workers
-                >= signal_required
-            )
-
-            else "Shortage"
-
-        )
-
-        details.append({
-
-            "item":
-
-                "Signal Workers",
-
-            "department":
-
-                "S&T",
-
-            "required":
-
-                signal_required,
-
-            "available":
-
-                signal_workers,
-
-            "status":
-
-                status,
-
-        })
-
-        if (
-
-            signal_workers
-            < signal_required
-
-        ):
-
-            ok = False
-
-    # ========================================================
-    # TRACTION WORKERS
-    # ========================================================
-
-    traction_required = (
-
-        worker_requirements[
-            "Traction"
-        ]
-
-    )
-
-    if traction_required > 0:
-
-        status = (
-
-            "Available"
-
-            if (
-                traction_workers
-                >= traction_required
-            )
-
-            else "Shortage"
-
-        )
-
-        details.append({
-
-            "item":
-
-                "TRD Workers",
-
-            "department":
-
-                "Traction",
-
-            "required":
-
-                traction_required,
-
-            "available":
-
-                traction_workers,
-
-            "status":
-
-                status,
-
-        })
-
-        if (
-
-            traction_workers
-            < traction_required
-
-        ):
-
-            ok = False
-
-    # ========================================================
-    # SUPERVISORS
-    # ========================================================
-
-    departments_involved = len(
-
-        [
-
-            department
-
-            for department, count
-
-            in worker_requirements.items()
-
-            if count > 0
-
-        ]
-
-    )
-
-    supervisor_required = max(
-
-        1,
-
-        departments_involved,
-
-    )
-
-    supervisor_status = (
-
-        "Available"
-
-        if (
-            supervisors_available
-            >= supervisor_required
-        )
-
-        else "Shortage"
-
-    )
-
-    details.append({
-
-        "item":
-
-            "JE/SSE Supervisors",
-
-        "required":
-
-            supervisor_required,
-
-        "available":
-
-            supervisors_available,
-
-        "status":
-
-            supervisor_status,
-
-    })
-
-    if (
-
-        supervisors_available
-        < supervisor_required
-
-    ):
-
-        ok = False
-
-    # ========================================================
-    # CRANE
-    # ========================================================
-
-    requires_crane = any(
-
-        task.get(
-            "requires_crane"
-        )
-
-        for task in tasks
-
-    )
-
-    if requires_crane:
-
-        status = (
-
-            "Available"
-
-            if crane_available >= 1
-
-            else "Not available"
-
-        )
-
-        details.append({
-
-            "item":
-
-                "Rail Crane",
-
-            "required": 1,
-
-            "available":
-
-                crane_available,
-
-            "status":
-
-                status,
-
-        })
-
-        if crane_available < 1:
-
-            ok = False
-
-    # ========================================================
-    # TOWER WAGON
-    # ========================================================
-
-    requires_tower_wagon = any(
-
-        task.get(
-            "requires_tower_wagon"
-        )
-
-        for task in tasks
-
-    )
-
-    if requires_tower_wagon:
-
-        status = (
-
-            "Available"
-
-            if (
-                tower_wagon_available
-                >= 1
-            )
-
-            else "Not available"
-
-        )
-
-        details.append({
-
-            "item":
-
-                "Tower Wagon",
-
-            "required": 1,
-
-            "available":
-
-                tower_wagon_available,
-
-            "status":
-
-                status,
-
-        })
-
-        if (
-
-            tower_wagon_available
-            < 1
-
-        ):
-
-            ok = False
-
-    # ========================================================
-    # WELDING UNIT
-    # ========================================================
-
-    requires_welding = any(
-
-        task.get(
-            "requires_welding"
-        )
-
-        for task in tasks
-
-    )
-
-    if requires_welding:
-
-        status = (
-
-            "Available"
-
-            if welding_available >= 1
-
-            else "Shortage"
-
-        )
-
-        details.append({
-
-            "item":
-
-                "Welding Unit",
-
-            "required": 1,
-
-            "available":
-
-                welding_available,
-
-            "status":
-
-                status,
-
-        })
-
-        if welding_available < 1:
-
-            ok = False
-
-    # --------------------------------------------------------
-    # GENERATE NOTES
-    # --------------------------------------------------------
-
-    notes = []
-
-    for item in details:
-
-        if (
-
-            item["status"]
-            != "Available"
-
-        ):
-
-            notes.append(
-
-                f"{item['item']}: "
-
-                f"need {item['required']}, "
-
-                f"have {item['available']}"
-
-            )
 
     return {
 
         "ok":
 
-            ok,
-
-        "details":
-
-            details,
+            not failed,
 
         "notes":
 
-            (
+            notes,
 
-                "; ".join(notes)
+        "requirements":
 
-                if notes
-
-                else "All required resources available"
-
-            ),
-
-        "summary":
-
-            (
-
-                "READY"
-
-                if ok
-
-                else "SHORTAGE"
-
-            ),
+            requirements,
 
     }
 
@@ -1211,144 +1208,334 @@ def check_resources(
 # ============================================================
 
 def assign_roles(
-    tasks: list
-) -> list:
+    tasks: List[Dict]
+) -> List[Dict]:
     """
-    Assign required roles based on department
-    and task requirements.
+    Generate suggested role assignments.
+
+    This does NOT assign actual people.
+
+    It assigns required railway roles based
+    on the departments involved.
     """
+
+    departments = set(
+
+        task.get(
+            "department"
+        )
+
+        for task in tasks
+
+    )
 
     assignments = []
 
-    for task in tasks:
+    # --------------------------------------------------------
+    # SECTION CONTROLLER
+    # --------------------------------------------------------
 
-        department = task[
-            "department"
-        ]
+    assignments.append({
 
-        # ----------------------------------------------------
-        # ENGINEERING
-        # ----------------------------------------------------
+        "role":
 
-        if department == "Engineering":
+            "Section Controller",
 
-            roles = [
+        "responsibility":
 
-                "SSE/JE (P.Way)",
+            (
+                "Coordinate block approval "
+                "and traffic management"
+            ),
 
-                "P.Way Gang",
+    })
 
-            ]
+    # --------------------------------------------------------
+    # ENGINEERING
+    # --------------------------------------------------------
 
-            if task.get(
-                "requires_welding"
-            ):
-
-                roles.append(
-                    "Welder"
-                )
-
-            if task.get(
-                "requires_crane"
-            ):
-
-                roles.append(
-                    "Crane Operator"
-                )
-
-        # ----------------------------------------------------
-        # SIGNAL
-        # ----------------------------------------------------
-
-        elif department == "S&T":
-
-            roles = [
-
-                "JE (Signal)",
-
-                "Signal Maintainer",
-
-            ]
-
-        # ----------------------------------------------------
-        # TRACTION
-        # ----------------------------------------------------
-
-        elif department == "Traction":
-
-            roles = [
-
-                "JE (TRD)",
-
-                "TRD Gang",
-
-            ]
-
-            if task.get(
-                "requires_tower_wagon"
-            ):
-
-                roles.append(
-                    "Tower Wagon Operator"
-                )
-
-        # ----------------------------------------------------
-        # DEFAULT
-        # ----------------------------------------------------
-
-        else:
-
-            roles = [
-
-                "Supervisor"
-
-            ]
+    if "Engineering" in departments:
 
         assignments.append({
 
-            "task_code":
+            "role":
 
-                task["task_code"],
+                "SSE (P.Way)",
 
-            "description":
+            "responsibility":
 
-                task["description"],
-
-            "department":
-
-                department,
-
-            "roles":
-
-                roles,
+                (
+                    "Supervise track maintenance work"
+                ),
 
         })
+
+    # --------------------------------------------------------
+    # SIGNAL & TELECOM
+    # --------------------------------------------------------
+
+    if "S&T" in departments:
+
+        assignments.append({
+
+            "role":
+
+                "SSE (Signal)",
+
+            "responsibility":
+
+                (
+                    "Supervise signalling work"
+                ),
+
+        })
+
+    # --------------------------------------------------------
+    # TRACTION
+    # --------------------------------------------------------
+
+    if "Traction" in departments:
+
+        assignments.append({
+
+            "role":
+
+                "SSE (TRD)",
+
+            "responsibility":
+
+                (
+                    "Supervise OHE and traction work"
+                ),
+
+        })
+
+    # --------------------------------------------------------
+    # SAFETY SUPERVISION
+    # --------------------------------------------------------
+
+    assignments.append({
+
+        "role":
+
+            "Safety Supervisor",
+
+        "responsibility":
+
+            (
+                "Verify safety procedures "
+                "before and during block"
+            ),
+
+    })
 
     return assignments
 
 
 # ============================================================
-# BLOCK PROPOSAL GENERATION
+# TIME FIT SCORE
+# ============================================================
+
+def calculate_time_fit_score(
+    task_hours: float,
+    gap_hours: float
+) -> float:
+    """
+    Calculate how efficiently a task fits
+    inside an available maintenance gap.
+
+    Formula:
+
+        Task Duration
+        -------------
+        Gap Duration
+
+        × 100
+
+    Example:
+
+        Task = 2 hours
+        Gap = 2.5 hours
+
+        Score = 80
+
+    A task must fit completely inside the gap.
+    """
+
+    if gap_hours <= 0:
+
+        return 0
+
+    # Task cannot fit
+
+    if task_hours > gap_hours:
+
+        return 0
+
+    fit_score = (
+
+        task_hours
+        /
+        gap_hours
+
+    ) * 100
+
+    return round(
+
+        clamp(fit_score),
+
+        1
+
+    )
+
+
+# ============================================================
+# SCHEDULING SCORE
+# ============================================================
+
+def calculate_scheduling_score(
+    task: Dict,
+    gap: Dict
+) -> float:
+    """
+    Calculate how suitable a task is
+    for a specific train-free maintenance gap.
+
+    Formula:
+
+        Task Priority     × 70%
+
+        +
+
+        Gap Suitability   × 20%
+
+        +
+
+        Time Fit          × 10%
+
+    Important:
+
+    A task can have different scheduling scores
+    for different gaps.
+    """
+
+    task_priority = float(
+
+        task.get(
+
+            "ai_score",
+
+            0
+
+        )
+
+    )
+
+    gap_suitability = float(
+
+        gap.get(
+
+            "suitability",
+
+            0
+
+        )
+
+    )
+
+    time_fit = (
+
+        calculate_time_fit_score(
+
+            float(
+                task.get(
+                    "est_hours",
+                    0
+                )
+            ),
+
+            float(
+                gap.get(
+                    "duration_hours",
+                    0
+                )
+            ),
+
+        )
+
+    )
+
+    scheduling_score = (
+
+        task_priority
+        *
+        WEIGHT_TASK_PRIORITY
+
+        +
+
+        gap_suitability
+        *
+        WEIGHT_GAP_SUITABILITY
+
+        +
+
+        time_fit
+        *
+        WEIGHT_TIME_FIT
+
+    )
+
+    return round(
+
+        clamp(scheduling_score),
+
+        1
+
+    )
+
+
+# ============================================================
+# GENERATE BLOCK PROPOSALS
 # ============================================================
 
 def generate_block_proposals(
     section_id: int = 1,
-    days: list = None
-):
+    days: List[str] = None
+) -> List[Dict]:
     """
-    Generate feasible maintenance block proposals.
+    Generate optimized maintenance block proposals.
 
-    Scheduling process:
+    COMPLETE PROCESS:
 
-    1. Load pending tasks.
-    2. Calculate priority.
-    3. Sort tasks by priority.
-    4. Find train-free gaps.
-    5. Try tasks one by one.
-    6. Check time constraints.
-    7. Check department-specific resources.
-    8. Add only feasible tasks.
-    9. Generate maintenance block.
+    STEP 1:
+        Load pending tasks.
+
+    STEP 2:
+        Calculate priority score.
+
+    STEP 3:
+        Find train-free gaps.
+
+    STEP 4:
+        Check whether tasks fit inside each gap.
+
+    STEP 5:
+        Calculate scheduling score.
+
+    STEP 6:
+        Rank tasks for the specific gap.
+
+    STEP 7:
+        Check resource constraints.
+
+    STEP 8:
+        Select feasible tasks.
+
+    STEP 9:
+        Generate maintenance block proposal.
+
+    This is a constraint-based heuristic
+    optimization approach.
     """
 
     # --------------------------------------------------------
@@ -1380,6 +1567,7 @@ def generate_block_proposals(
     conn = get_conn()
 
     task_rows = conn.execute(
+
         """
         SELECT *
 
@@ -1389,9 +1577,9 @@ def generate_block_proposals(
 
         AND status = 'pending'
         """,
-        (
-            section_id,
-        ),
+
+        (section_id,),
+
     ).fetchall()
 
     conn.close()
@@ -1412,45 +1600,51 @@ def generate_block_proposals(
 
         task["ai_score"] = (
 
-            compute_priority(
-                task
-            )
+            compute_priority(task)
 
         )
 
         task["priority"] = (
 
             get_priority_label(
+
                 task["ai_score"]
+
             )
 
         )
 
-    # Highest priority first
+    # --------------------------------------------------------
+    # SORT BY BASE PRIORITY
+    # --------------------------------------------------------
 
     tasks.sort(
 
         key=lambda task:
 
-            -task["ai_score"]
+            task["ai_score"],
+
+        reverse=True
 
     )
 
-    # --------------------------------------------------------
-    # INITIALIZE
-    # --------------------------------------------------------
-
     proposals = []
+
+    # Prevent same task from being assigned twice
 
     used_task_ids = set()
 
-    block_num = 1
+    block_number = 1
 
-    # --------------------------------------------------------
+    # ========================================================
     # PROCESS EACH DAY
-    # --------------------------------------------------------
+    # ========================================================
 
     for day in days:
+
+        # ----------------------------------------------------
+        # FIND TRAIN-FREE GAPS
+        # ----------------------------------------------------
 
         gaps = find_block_gaps(
 
@@ -1467,12 +1661,14 @@ def generate_block_proposals(
             continue
 
         # ----------------------------------------------------
-        # PROCESS BEST GAPS
+        # PROCESS EACH GAP
         # ----------------------------------------------------
 
-        for gap in gaps[:4]:
+        for gap in gaps:
 
-            # Remaining tasks only
+            # ------------------------------------------------
+            # REMAINING TASKS
+            # ------------------------------------------------
 
             remaining_tasks = [
 
@@ -1481,6 +1677,7 @@ def generate_block_proposals(
                 for task in tasks
 
                 if task["id"]
+
                 not in used_task_ids
 
             ]
@@ -1489,47 +1686,163 @@ def generate_block_proposals(
 
                 break
 
-            selected = []
-
-            hours_left = gap[
-                "duration_hours"
-            ]
-
             # ------------------------------------------------
-            # TRY TASKS ONE BY ONE
+            # CALCULATE SCHEDULING SCORE
             # ------------------------------------------------
+
+            scored_tasks = []
 
             for task in remaining_tasks:
 
+                task_hours = float(
+
+                    task.get(
+
+                        "est_hours",
+
+                        0
+
+                    )
+
+                )
+
+                gap_hours = float(
+
+                    gap.get(
+
+                        "duration_hours",
+
+                        0
+
+                    )
+
+                )
+
                 # --------------------------------------------
-                # CHECK TIME CONSTRAINT
+                # TASK MUST FIT
                 # --------------------------------------------
 
-                if (
-
-                    task["est_hours"]
-
-                    > hours_left + 0.5
-
-                ):
+                if task_hours > gap_hours:
 
                     continue
 
                 # --------------------------------------------
-                # TEMPORARILY ADD TASK
+                # CALCULATE SCHEDULING SCORE
+                # --------------------------------------------
+
+                scheduling_score = (
+
+                    calculate_scheduling_score(
+
+                        task,
+
+                        gap
+
+                    )
+
+                )
+
+                time_fit_score = (
+
+                    calculate_time_fit_score(
+
+                        task_hours,
+
+                        gap_hours
+
+                    )
+
+                )
+
+                task_copy = task.copy()
+
+                task_copy[
+                    "scheduling_score"
+                ] = scheduling_score
+
+                task_copy[
+                    "time_fit_score"
+                ] = time_fit_score
+
+                scored_tasks.append(
+
+                    task_copy
+
+                )
+
+            # ------------------------------------------------
+            # SORT TASKS FOR THIS GAP
+            # ------------------------------------------------
+
+            scored_tasks.sort(
+
+                key=lambda task:
+
+                    task[
+                        "scheduling_score"
+                    ],
+
+                reverse=True
+
+            )
+
+            if not scored_tasks:
+
+                continue
+
+            # ------------------------------------------------
+            # SELECT TASKS
+            # ------------------------------------------------
+
+            selected = []
+
+            hours_left = float(
+
+                gap[
+                    "duration_hours"
+                ]
+
+            )
+
+            # ------------------------------------------------
+            # TRY TASKS IN ORDER
+            # ------------------------------------------------
+
+            for task in scored_tasks:
+
+                task_hours = float(
+
+                    task.get(
+
+                        "est_hours",
+
+                        0
+
+                    )
+
+                )
+
+                # --------------------------------------------
+                # CHECK AVAILABLE TIME
+                # --------------------------------------------
+
+                if task_hours > hours_left:
+
+                    continue
+
+                # --------------------------------------------
+                # TEST RESOURCE AVAILABILITY
                 # --------------------------------------------
 
                 test_selection = (
 
                     selected
 
-                    + [task]
+                    +
+
+                    [task]
 
                 )
-
-                # --------------------------------------------
-                # CHECK RESOURCES
-                # --------------------------------------------
 
                 resource_check = (
 
@@ -1537,36 +1850,32 @@ def generate_block_proposals(
 
                         day,
 
-                        test_selection,
+                        test_selection
 
                     )
 
                 )
 
                 # --------------------------------------------
-                # ACCEPT TASK ONLY IF FEASIBLE
+                # ACCEPT TASK
                 # --------------------------------------------
 
                 if resource_check["ok"]:
 
                     selected.append(
+
                         task
+
                     )
 
                     hours_left -= (
 
-                        task[
-                            "est_hours"
-                        ]
+                        task_hours
 
                     )
 
-                # Otherwise:
-                # Skip task and continue checking
-                # lower-priority tasks.
-
             # ------------------------------------------------
-            # NO FEASIBLE TASKS
+            # NO TASK SELECTED
             # ------------------------------------------------
 
             if not selected:
@@ -1583,7 +1892,7 @@ def generate_block_proposals(
 
                     day,
 
-                    selected,
+                    selected
 
                 )
 
@@ -1594,22 +1903,24 @@ def generate_block_proposals(
                 continue
 
             # ------------------------------------------------
-            # ASSIGN ROLES
+            # ROLE ASSIGNMENTS
             # ------------------------------------------------
 
             role_assignments = (
 
                 assign_roles(
+
                     selected
+
                 )
 
             )
 
             # ------------------------------------------------
-            # CALCULATE BLOCK PRIORITY
+            # CALCULATE AVERAGE TASK PRIORITY
             # ------------------------------------------------
 
-            avg_score = (
+            average_ai_score = (
 
                 sum(
 
@@ -1619,19 +1930,108 @@ def generate_block_proposals(
 
                 )
 
-                / len(selected)
+                /
+
+                len(selected)
 
             )
 
             # ------------------------------------------------
-            # CREATE PROPOSAL
+            # CALCULATE AVERAGE SCHEDULING SCORE
             # ------------------------------------------------
 
-            proposals.append({
+            average_scheduling_score = (
+
+                sum(
+
+                    task[
+                        "scheduling_score"
+                    ]
+
+                    for task in selected
+
+                )
+
+                /
+
+                len(selected)
+
+            )
+
+            # ------------------------------------------------
+            # CALCULATE USED HOURS
+            # ------------------------------------------------
+
+            used_hours = (
+
+                sum(
+
+                    float(
+
+                        task.get(
+
+                            "est_hours",
+
+                            0
+
+                        )
+
+                    )
+
+                    for task in selected
+
+                )
+
+            )
+
+            # ------------------------------------------------
+            # GAP UTILIZATION
+            # ------------------------------------------------
+
+            gap_duration = float(
+
+                gap[
+                    "duration_hours"
+                ]
+
+            )
+
+            utilization_percent = (
+
+                used_hours
+
+                /
+
+                gap_duration
+
+                *
+
+                100
+
+            )
+
+            utilization_percent = (
+
+                clamp(
+
+                    utilization_percent
+
+                )
+
+            )
+
+            # ------------------------------------------------
+            # CREATE BLOCK PROPOSAL
+            # ------------------------------------------------
+
+            proposal = {
 
                 "block_code":
 
-                    f"BLK-DG-{block_num:03d}",
+                    (
+                        f"BLK-DG-"
+                        f"{block_number:03d}"
+                    ),
 
                 "section":
 
@@ -1651,27 +2051,70 @@ def generate_block_proposals(
 
                 "duration_hours":
 
-                    gap[
-                        "duration_hours"
-                    ],
+                    round(
+
+                        gap_duration,
+
+                        2
+
+                    ),
+
+                "used_hours":
+
+                    round(
+
+                        used_hours,
+
+                        2
+
+                    ),
+
+                "unused_hours":
+
+                    round(
+
+                        hours_left,
+
+                        2
+
+                    ),
+
+                "utilization_percent":
+
+                    round(
+
+                        utilization_percent,
+
+                        1
+
+                    ),
 
                 "gap_reason":
 
-                    gap[
-                        "reason"
-                    ],
+                    gap["reason"],
 
                 "suitability":
 
-                    gap[
-                        "suitability"
-                    ],
+                    gap["suitability"],
 
                 "ai_score":
 
                     round(
-                        avg_score,
+
+                        average_ai_score,
+
                         1
+
+                    ),
+
+                "scheduling_score":
+
+                    round(
+
+                        average_scheduling_score,
+
+                        1
+
                     ),
 
                 "tasks":
@@ -1690,7 +2133,13 @@ def generate_block_proposals(
 
                     "proposed",
 
-            })
+            }
+
+            proposals.append(
+
+                proposal
+
+            )
 
             # ------------------------------------------------
             # MARK TASKS AS USED
@@ -1704,65 +2153,108 @@ def generate_block_proposals(
 
                 )
 
-            block_num += 1
+            block_number += 1
 
     return proposals
 
 
 # ============================================================
-# SAVE PROPOSALS TO DATABASE
+# SAVE PROPOSALS
 # ============================================================
 
 def save_proposals(
-    proposals: list
+    proposals: List[Dict]
 ):
     """
     Save generated block proposals
-    for officer approval.
+    into the database.
+
+    Existing proposals are deleted before
+    saving new optimization results.
     """
 
     conn = get_conn()
 
     cursor = conn.cursor()
 
-    # Remove previous generated proposals
+    # --------------------------------------------------------
+    # REMOVE OLD PROPOSALS
+    # --------------------------------------------------------
 
     cursor.execute(
+
         "DELETE FROM block_assignments"
+
     )
 
     cursor.execute(
-        "DELETE FROM approvals"
-    )
 
-    cursor.execute(
         "DELETE FROM proposed_blocks"
+
     )
 
     # --------------------------------------------------------
-    # SAVE EACH BLOCK
+    # SAVE NEW PROPOSALS
     # --------------------------------------------------------
 
     for proposal in proposals:
 
+        resource_status = (
+
+            "available"
+
+            if proposal[
+                "resource_check"
+            ]["ok"]
+
+            else
+
+            "unavailable"
+
+        )
+
+        resource_notes = " | ".join(
+
+            proposal[
+                "resource_check"
+            ]["notes"]
+
+        )
+
         cursor.execute(
+
             """
-            INSERT INTO proposed_blocks
-            (
+            INSERT INTO proposed_blocks (
+
                 block_code,
+
                 section_id,
+
                 day_of_week,
+
                 start_time,
+
                 end_time,
+
                 duration_hours,
+
                 status,
+
                 ai_score,
+
                 resource_status,
+
                 resource_notes
+
             )
 
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+            VALUES (
+
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+
+            )
             """,
+
             (
 
                 proposal[
@@ -1787,25 +2279,20 @@ def save_proposals(
                     "duration_hours"
                 ],
 
-                "proposed",
+                proposal[
+                    "status"
+                ],
 
                 proposal[
                     "ai_score"
                 ],
 
-                proposal[
-                    "resource_check"
-                ][
-                    "summary"
-                ],
+                resource_status,
 
-                proposal[
-                    "resource_check"
-                ][
-                    "notes"
-                ],
+                resource_notes,
 
             ),
+
         )
 
         block_id = cursor.lastrowid
@@ -1816,28 +2303,46 @@ def save_proposals(
 
         for task in proposal["tasks"]:
 
+            assigned_role = (
+
+                "Maintenance Team"
+
+            )
+
             cursor.execute(
+
                 """
-                INSERT INTO block_assignments
-                (
+                INSERT INTO block_assignments (
+
                     block_id,
+
                     task_id,
-                    assigned_role
+
+                    assigned_role,
+
+                    resource_id
+
                 )
 
-                VALUES (?,?,?)
+                VALUES (
+
+                    ?, ?, ?, ?
+
+                )
                 """,
+
                 (
 
                     block_id,
 
                     task["id"],
 
-                    task[
-                        "department"
-                    ],
+                    assigned_role,
+
+                    None,
 
                 ),
+
             )
 
     conn.commit()
@@ -1846,24 +2351,24 @@ def save_proposals(
 
 
 # ============================================================
-# WHAT-IF: DELAY SIMULATION
+# WHAT-IF DELAY ANALYSIS
 # ============================================================
 
 def whatif_delay(
     block_code: str,
-    delay_hours: float
-) -> dict:
+    delay_hours: float = 2.0
+) -> Dict:
     """
-    Simulate the effect of delaying a block.
+    Simulate what happens if a maintenance block
+    is delayed.
 
-    Note:
-    This is currently a prototype simulation
-    using configurable assumptions.
+    This does not modify the actual database.
     """
 
     conn = get_conn()
 
     block = conn.execute(
+
         """
         SELECT *
 
@@ -1871,14 +2376,14 @@ def whatif_delay(
 
         WHERE block_code = ?
         """,
-        (
-            block_code,
-        ),
+
+        (block_code,),
+
     ).fetchone()
 
-    conn.close()
-
     if not block:
+
+        conn.close()
 
         return {
 
@@ -1888,107 +2393,123 @@ def whatif_delay(
 
         }
 
-    # Prototype assumptions
+    block = dict(block)
 
-    base_availability = 94.2
+    conn.close()
 
-    impact = (
+    original_duration = float(
 
-        delay_hours * 0.35
+        block[
+            "duration_hours"
+        ]
 
     )
 
-    if (
+    delayed_duration = max(
 
-        block["ai_score"]
+        0,
 
-        and block["ai_score"] >= 85
+        original_duration
 
-    ):
+        -
 
-        impact += 1.0
+        delay_hours
 
-    new_availability = round(
+    )
 
-        base_availability - impact,
+    percentage_remaining = (
 
-        1,
+        delayed_duration
+
+        /
+
+        original_duration
+
+        *
+
+        100
+
+        if original_duration > 0
+
+        else 0
 
     )
 
     return {
-
-        "scenario":
-
-            "delay",
 
         "block_code":
 
             block_code,
 
+        "original_duration_hours":
+
+            original_duration,
+
         "delay_hours":
 
             delay_hours,
 
-        "original_window":
-
-            (
-                f"{block['day_of_week']} "
-
-                f"{block['start_time']}"
-
-                f"–{block['end_time']}"
-            ),
-
-        "projected_availability":
-
-            new_availability,
-
-        "availability_drop":
+        "remaining_duration_hours":
 
             round(
-                impact,
-                1
+
+                delayed_duration,
+
+                2
+
             ),
 
-        "effects":
+        "remaining_capacity_percent":
 
-            [
+            round(
 
-                f"Asset availability drops by "
+                percentage_remaining,
 
-                f"~{impact:.1f}%",
+                1
 
-                "Downstream blocks may shift",
+            ),
 
-                "Risk of train punctuality impact",
-
-                (
-
-                    "Critical defects remain open longer"
-
-                    if (
-                        block["ai_score"]
-                        or 0
-                    ) >= 85
-
-                    else
-
-                    "Medium priority work deferred"
-
-                ),
-
-            ],
-
-        "ai_suggestion":
+        "impact":
 
             (
 
-                "Prefer re-slotting within "
+                "HIGH"
 
-                "the next 24–48 hours using "
+                if percentage_remaining < 50
 
-                "the next feasible train gap."
+                else
+
+                "MEDIUM"
+
+                if percentage_remaining < 80
+
+                else
+
+                "LOW"
+
+            ),
+
+        "recommendation":
+
+            (
+
+                "Re-optimize the block because "
+                "more than half of the maintenance "
+                "window is lost."
+
+                if percentage_remaining < 50
+
+                else
+
+                "Review lower priority tasks and "
+                "consider moving them to another block."
+
+                if percentage_remaining < 80
+
+                else
+
+                "Minor delay. Existing plan may "
+                "still be feasible."
 
             ),
 
@@ -1996,87 +2517,121 @@ def whatif_delay(
 
 
 # ============================================================
-# WHAT-IF: WEATHER SIMULATION
+# WHAT-IF WEATHER ANALYSIS
 # ============================================================
 
 def whatif_weather(
     block_code: str,
     weather: str
-) -> dict:
+) -> Dict:
     """
-    Prototype weather impact simulation.
+    Simulate weather impact on a block.
 
-    This is currently rule-based,
-    not machine-learning weather prediction.
+    Weather options:
+
+    - rain
+    - heavy_rain
+    - fog
+    - heat
+    - storm
     """
 
-    weather = weather.lower()
+    weather = weather.lower().strip()
 
-    outdoor_risk = {
+    weather_impacts = {
 
-        "rain":
+        "rain": {
 
-            (
-                "High",
+            "risk": "MEDIUM",
 
-                "Track and OHE outdoor work "
-                "requires additional safety review.",
-            ),
+            "productivity_reduction": 20,
 
-        "heavy_rain":
+            "recommendation":
+                (
+                    "Continue only with appropriate "
+                    "safety precautions."
+                ),
 
-            (
-                "Critical",
+        },
 
-                "Outdoor maintenance should "
-                "generally be postponed.",
-            ),
+        "heavy_rain": {
 
-        "fog":
+            "risk": "HIGH",
 
-            (
-                "Medium",
+            "productivity_reduction": 50,
 
-                "Visibility restrictions may "
-                "affect signalling operations.",
-            ),
+            "recommendation":
+                (
+                    "Consider postponing outdoor "
+                    "maintenance activities."
+                ),
 
-        "heat":
+        },
 
-            (
-                "Medium",
+        "fog": {
 
-                "Limit continuous outdoor work.",
-            ),
+            "risk": "MEDIUM",
 
-        "storm":
+            "productivity_reduction": 15,
 
-            (
-                "Critical",
+            "recommendation":
+                (
+                    "Coordinate with traffic control "
+                    "due to reduced visibility."
+                ),
 
-                "Cancel unsafe work and secure "
-                "the maintenance site.",
-            ),
+        },
+
+        "heat": {
+
+            "risk": "MEDIUM",
+
+            "productivity_reduction": 20,
+
+            "recommendation":
+                (
+                    "Provide worker rest periods "
+                    "and monitor heat exposure."
+                ),
+
+        },
+
+        "storm": {
+
+            "risk": "CRITICAL",
+
+            "productivity_reduction": 80,
+
+            "recommendation":
+                (
+                    "Do not proceed until conditions "
+                    "are declared safe."
+                ),
+
+        },
 
     }
 
-    level, message = outdoor_risk.get(
+    impact = weather_impacts.get(
 
         weather,
 
-        (
-            "Low",
+        {
 
-            "No major restriction",
-        ),
+            "risk": "UNKNOWN",
+
+            "productivity_reduction": 0,
+
+            "recommendation":
+
+                "No weather rule available for "
+                "the selected condition.",
+
+        },
 
     )
 
     return {
-
-        "scenario":
-
-            "weather",
 
         "block_code":
 
@@ -2086,112 +2641,20 @@ def whatif_weather(
 
             weather,
 
-        "risk_level":
+        "risk":
 
-            level,
+            impact["risk"],
 
-        "message":
+        "productivity_reduction_percent":
 
-            message,
-
-        "ai_actions":
-
-            [
-
-                "Re-evaluate outdoor Engineering tasks",
-
-                "Re-evaluate Traction work",
-
-                "Keep safe indoor S&T work where possible",
-
-                "Move crane-dependent work if required",
-
-                "Notify officer for approval",
-
+            impact[
+                "productivity_reduction"
             ],
 
-        "recommended":
+        "recommendation":
 
-            (
-
-                "Postpone"
-
-                if level in (
-
-                    "High",
-
-                    "Critical",
-
-                )
-
-                else
-
-                "Proceed with caution"
-
-            ),
+            impact[
+                "recommendation"
+            ],
 
     }
-
-
-# ============================================================
-# LIST TASKS WITH PRIORITY
-# ============================================================
-
-def list_tasks_with_priority():
-    """
-    Return all tasks with calculated priority
-    and score explanations.
-    """
-
-    conn = get_conn()
-
-    rows = conn.execute(
-        """
-        SELECT *
-
-        FROM tasks
-
-        WHERE section_id = 1
-        """
-    ).fetchall()
-
-    conn.close()
-
-    output = []
-
-    for row in rows:
-
-        task = dict(row)
-
-        task["ai_score"] = (
-
-            compute_priority(
-                task
-            )
-
-        )
-
-        task["priority"] = (
-
-            get_priority_label(
-                task["ai_score"]
-            )
-
-        )
-
-        output.append(
-            task
-        )
-
-    # Highest priority first
-
-    output.sort(
-
-        key=lambda task:
-
-            -task["ai_score"]
-
-    )
-
-    return output
-```
